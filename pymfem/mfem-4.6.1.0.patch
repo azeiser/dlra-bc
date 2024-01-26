@@ -1,0 +1,223 @@
+diff --git a/fem/bilininteg.cpp b/fem/bilininteg.cpp
+index eb2a7ce04..2d732a1ed 100644
+--- a/fem/bilininteg.cpp
++++ b/fem/bilininteg.cpp
+@@ -3270,6 +3270,178 @@ double ElasticityIntegrator::ComputeFluxEnergy(const FiniteElement &fluxelem,
+    return energy;
+ }
+ 
++
++void CIPTraceIntegrator::AssembleFaceMatrix(const FiniteElement &el1,
++                                           const FiniteElement &el2,
++                                           FaceElementTransformations &Trans,
++                                           DenseMatrix &elmat)
++{
++   int dim = el1.GetDim();
++
++   int ndof1, ndof2;
++   double w;
++   DenseMatrix dshape1, dshape2;
++   Vector dshape1_n, dshape2_n;
++   Vector nor(dim), J1inv_nor(dim), J2inv_nor(dim);
++
++   ndof1 = el1.GetDof();
++
++   if (Trans.Elem2No >= 0)
++   {
++      ndof2 = el2.GetDof();
++   }
++   else
++   {
++      ndof2 = 0;
++   }
++
++   elmat.SetSize(ndof1 + ndof2);
++   elmat = 0.0;
++
++   // on the boundary if second element does not exists -> return zero matrix
++   if (Trans.Elem2No < 0)
++   {
++       return;
++   }
++
++   // get h_F for weighing
++   // taken from miniapp
++   // https://github.com/mfem/mfem/blob/master/miniapps/meshing/mesh-explorer.cpp#L849
++   double h_F;
++   switch (dim)
++   {
++      case 1:
++      {
++         DenseMatrix J(dim);
++         // take maximum of element sizes left and right of face
++         // Element 1
++         ElementTransformation &Trans1 = Trans.GetElement1Transformation();
++         Geometry::Type geom1 = Trans1.GetGeometryType();
++         Trans1.SetIntPoint(&Geometries.GetCenter(geom1));
++         Geometries.JacToPerfJac(geom1, Trans1.Jacobian(), J);
++         double h1 = fabs(J.Det());
++
++         // Element 2
++         ElementTransformation &Trans2 = Trans.GetElement2Transformation();
++         Geometry::Type geom2 = Trans1.GetGeometryType();
++         Trans1.SetIntPoint(&Geometries.GetCenter(geom2));
++         Geometries.JacToPerfJac(geom2, Trans1.Jacobian(), J);
++         double h2 = fabs(J.Det());
++
++         // take maximum
++         h_F = max(h1, h2);
++         break;
++      }
++      case 2:  case 3:
++      {
++         DenseMatrix J, JT, M(dim-1,dim-1);
++         Geometry::Type geom = Trans.GetGeometryType();
++         Trans.SetIntPoint(&Geometries.GetCenter(geom));
++         Geometries.JacToPerfJac(geom, Trans.Jacobian(), J);
++         // M = J^T * J
++         JT.Transpose(J);
++         Mult(JT, J, M);
++         h_F = pow(fabs(M.Det()), 0.5/(dim-1));
++         break;
++      }
++      default:
++      {
++         std::cout << "Not implemented" << std::endl;
++      }
++   }
++
++   const IntegrationRule *ir = IntRule;
++   if (ir == NULL)
++   {
++      int order;
++      order = (min(Trans.Elem1->OrderW(), Trans.Elem2->OrderW()) +
++                  2*max(el1.GetOrder(), el2.GetOrder()));
++      if (el1.Space() == FunctionSpace::Pk)
++      {
++         order++;
++      }
++      ir = &IntRules.Get(Trans.GetGeometryType(), order);
++   }
++
++   dshape1.SetSize(ndof1, dim);
++   dshape1_n.SetSize(ndof1);
++
++   dshape2.SetSize(ndof2, dim);
++   dshape2_n.SetSize(ndof2);
++
++   for (int p = 0; p < ir->GetNPoints(); p++)
++   {
++      const IntegrationPoint &ip = ir->IntPoint(p);
++
++      // Set the integration point in the face and the neighboring elements
++      Trans.SetAllIntPoints(&ip);
++
++      // Access the neighboring elements' integration points
++      const IntegrationPoint &eip1 = Trans.GetElement1IntPoint();
++      const IntegrationPoint &eip2 = Trans.GetElement2IntPoint();
++
++      w = delta * h_F * h_F * ip.weight * Trans.Weight();
++
++      // outer normal of el1
++      if (dim == 1)
++      {
++         nor(0) = 2*eip1.x - 1.0;
++      }
++      else
++      {
++         CalcOrtho(Trans.Jacobian(), nor);
++      }
++
++      // do normalization (see https://mfem.org/howto/outer_normals/)
++      nor /= nor.Norml2();
++
++      // derivatives
++      el1.CalcDShape(eip1, dshape1);
++      el2.CalcDShape(eip2, dshape2);
++
++      // transformed normals J_i^-1 n
++      Trans.Elem1->InverseJacobian().Mult(nor, J1inv_nor);
++      Trans.Elem2->InverseJacobian().Mult(nor, J2inv_nor);
++
++      // directional derivative off all basis function wrt. normal n
++      dshape1.Mult(J1inv_nor, dshape1_n);  // dshape1_n = \nabla_x phi|K1 * n
++      dshape2.Mult(J2inv_nor, dshape2_n);  // dshape2_n = \nabla_x psi|K2 * n
++
++      // the jump of the gradient of a fe function at face F is given by
++      // [\nabla v]_F = \nabla v|K1 * n - \nabla v|K2 * n
++      // = \sum_i a_i \nabla phi_i * n - sum_j b_j \nabla psi_j *n
++      // where  F is the common face of the elements K1 and K2 and
++      //    a_i coefficients of the functions phi_i in K1
++      //    b_j coefficients of the functions psi_j in K2
++      // the face contributes to the bilinear form
++      // [\nabla v]_F * [\nabla w]_F =  [ A    | -B ]
++      //                                [ -B^T |  C ]
++      // part A
++      for (int i = 0; i < ndof1; ++i)
++         for (int is = 0; is < ndof1; ++is)
++         {
++            elmat(i, is) += w * dshape1_n(i) * dshape1_n(is);
++         }
++
++      // part -B, -B^T
++      for (int i = 0; i < ndof1; ++i)
++         for (int j = 0; j < ndof2; ++j)
++         {
++            elmat(i, ndof1 + j) -= w * dshape1_n(i) * dshape2_n(j);
++            elmat(ndof1 + j, i) -= w * dshape1_n(i) * dshape2_n(j);
++         }
++
++      // part C
++      for (int j = 0; j < ndof2; ++j)
++         for (int js = 0; js < ndof2; ++js)
++         {
++            elmat(ndof1 + j, ndof1 + js) += w * dshape2_n(j) * dshape2_n(js);
++         }
++   }
++
++}
++
++
+ void DGTraceIntegrator::AssembleFaceMatrix(const FiniteElement &el1,
+                                            const FiniteElement &el2,
+                                            FaceElementTransformations &Trans,
+diff --git a/fem/bilininteg.hpp b/fem/bilininteg.hpp
+index 81ae788f7..ef55dc73f 100644
+--- a/fem/bilininteg.hpp
++++ b/fem/bilininteg.hpp
+@@ -3037,6 +3037,35 @@ public:
+                                     Vector &flux, Vector *d_energy = NULL);
+ };
+ 
++
++/* CIP stabilization bilinear form 
++*/
++class CIPTraceIntegrator : public BilinearFormIntegrator
++{
++protected:
++   double delta;
++
++private:
++   Vector shape1, shape2;
++
++public:
++   CIPTraceIntegrator() : delta(1.0)
++   { }
++
++   CIPTraceIntegrator(double delta_) : delta(delta_)
++   { }
++
++
++   using BilinearFormIntegrator::AssembleFaceMatrix;
++   virtual void AssembleFaceMatrix(const FiniteElement &el1,
++                                   const FiniteElement &el2,
++                                   FaceElementTransformations &Trans,
++                                   DenseMatrix &elmat);
++};
++
++
++
++
+ /** Integrator for the DG form:
+     alpha < rho_u (u.n) {v},[w] > + beta < rho_u |u.n| [v],[w] >,
+     where v and w are the trial and test variables, respectively, and rho/u are
