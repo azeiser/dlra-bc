@@ -1,6 +1,6 @@
 # Dynamical low-rank approximation of the Vlasov-Poisson equation with piecewise linear spatial boundary
 
-[A. Uschmajew, A. Zeiser: Dynamical low-rank approximation of the Vlasov-Poisson equation with piecewise linear spatial boundary](https://arxiv.org/abs/2110.13481)
+[A. Uschmajew, A. Zeiser: Dynamical low-rank approximation of the Vlasov-Poisson equation with piecewise linear spatial boundary](https://doi.org/10.1007/s10543-024-01019-8)
 
 
 ## Build patched MFEM + PyMFEM
